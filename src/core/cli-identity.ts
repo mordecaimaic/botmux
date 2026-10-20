@@ -229,6 +229,7 @@ export interface LarkCliHomeIdentity extends TurnBound {
 }
 
 export interface BytedCliIdentity extends TurnBound {
+  gitAuthor?: { name: string; email: string };
   tool: 'bytedcli';
   cloudJwt: string;
   /** Optional: only present once a Codebase JWT has been minted for this person. */
@@ -331,6 +332,10 @@ export function renderIdentityEnv(identity: CliIdentity): string {
   } else {
     pairs.push([MODE_VAR, 'user'], ['BYTEDCLI_USER_CLOUD_JWT', identity.cloudJwt]);
     if (identity.codeJwt) pairs.push(['BYTEDCLI_USER_CODE_JWT', identity.codeJwt]);
+    if (identity.gitAuthor) pairs.push(
+      ['BOTMUX_GIT_AUTHOR_NAME', identity.gitAuthor.name],
+      ['BOTMUX_GIT_AUTHOR_EMAIL', identity.gitAuthor.email],
+    );
   }
   if (identity.turnId) pairs.push([TURN_VAR, identity.turnId]);
   if ('openId' in identity && identity.openId) pairs.push([OPEN_ID_VAR, identity.openId]);
@@ -591,8 +596,7 @@ function bytedcliIsolatedExec(realBinaryPath: string): string[] {
  *    once B has spoken. That is the trade this feature is for — a failed command
  *    is recoverable, a command that silently ran as the wrong person is not.
  */
-export function renderIdentityWrapper(tool: TriggerUserAuthTool, realBinaryPath: string): string {
-  const exportKeys = IDENTITY_ENV_KEYS[tool].join(' ');
+function identityPrelude(tool: TriggerUserAuthTool): string[] {
   return [
     '#!/bin/sh',
     '# botmux trigger-user identity wrapper — generated, do not edit.',
@@ -611,6 +615,8 @@ export function renderIdentityWrapper(tool: TriggerUserAuthTool, realBinaryPath:
     // re-set from the credential file below when it carries them.
     `${TURN_VAR}=`,
     `${OPEN_ID_VAR}=`,
+    'BOTMUX_GIT_AUTHOR_NAME=',
+    'BOTMUX_GIT_AUTHOR_EMAIL=',
     'if [ -n "$SESSION_DATA_DIR" ] && [ -n "$BOTMUX_SESSION_ID" ]; then',
     `  __botmux_cred="$SESSION_DATA_DIR/cli-identity/$BOTMUX_SESSION_ID.bin/.data/${tool}.env"`,
     '  if [ -f "$__botmux_cred" ]; then',
@@ -652,8 +658,76 @@ export function renderIdentityWrapper(tool: TriggerUserAuthTool, realBinaryPath:
     `    ${MODE_VAR}=$__botmux_published_mode`,
     '  fi',
     'fi',
+    '__botmux_identity_bound=',
+    `if [ -n "$${TURN_VAR}" ] && [ -n "$__botmux_live" ]; then __botmux_identity_bound=1; fi`,
     'unset __botmux_live __botmux_live_caller __botmux_published_mode',
     '',
+  ];
+}
+
+/**
+ * Fresh commits use the verified turn sender as both author and committer.
+ * No shared repository/global config is written. Historical authors retained by
+ * rebase/cherry-pick/am remain Git's responsibility; their committer is current.
+ * This controls attribution in the managed Git entry, not cryptographic proof
+ * of authorship (Git metadata can be edited outside this entry).
+ */
+export function renderGitAuthorWrapper(realGitPath: string): string {
+  return [
+    ...identityPrelude('bytedcli'),
+    // Empty exported idents prevent fallback to the host's config, even through
+    // aliases or commit-tree. Read-only commands still work before login.
+    'GIT_AUTHOR_NAME= GIT_AUTHOR_EMAIL= GIT_COMMITTER_NAME= GIT_COMMITTER_EMAIL=',
+    'unset GIT_AUTHOR_IDENT GIT_COMMITTER_IDENT EMAIL',
+    `if [ "$${MODE_VAR}" = user ] && [ "$__botmux_identity_bound" = 1 ] && [ -n "$BOTMUX_GIT_AUTHOR_NAME" ] && [ -n "$BOTMUX_GIT_AUTHOR_EMAIL" ]; then`,
+    '  GIT_AUTHOR_NAME=$BOTMUX_GIT_AUTHOR_NAME',
+    '  GIT_COMMITTER_NAME=$BOTMUX_GIT_AUTHOR_NAME',
+    '  GIT_AUTHOR_EMAIL=$BOTMUX_GIT_AUTHOR_EMAIL',
+    '  GIT_COMMITTER_EMAIL=$BOTMUX_GIT_AUTHOR_EMAIL',
+    'fi',
+    'export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL',
+    // Parse Git's global options only; never eval argv or modify the caller's
+    // positional parameters. Pass the original arguments to Git unchanged.
+    '__botmux_git_command= __botmux_git_skip=',
+    'for __botmux_git_arg in "$@"; do',
+    '  if [ -n "$__botmux_git_skip" ]; then __botmux_git_skip=; continue; fi',
+    '  case "$__botmux_git_arg" in',
+    '    -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env) __botmux_git_skip=1 ;;',
+    '    -*) ;;',
+    '    *) __botmux_git_command=$__botmux_git_arg; break ;;',
+    '  esac',
+    'done',
+    'case "$__botmux_git_command" in',
+    '  commit|commit-tree|merge|rebase|cherry-pick|revert|am)',
+    '    if [ -z "$GIT_COMMITTER_EMAIL" ]; then',
+    `      printf '%s\\n' "\${${DENY_MSG_VAR}:-botmux: 当前轮次缺少已验证的 Git 作者姓名和邮箱。请确认发起人已完成 bytedcli 授权，再重试；保留当前暂存内容。}" >&2`,
+    `      exit ${IDENTITY_DENIED_EXIT_CODE}`,
+    '    fi',
+    '    ;;',
+    'esac',
+    // A model should not override the verified author on a fresh commit.
+    // Log filtering remains available. Historical replay keeps Git semantics.
+    'if [ "$__botmux_git_command" = commit ]; then',
+    '  for __botmux_git_arg in "$@"; do',
+    '    case "$__botmux_git_arg" in',
+    '      --author|--author=*)',
+    `        printf '%s\\n' 'botmux: Git 作者由当前发起人的已验证身份提供，请移除 --author 参数。' >&2`,
+    `        exit ${IDENTITY_DENIED_EXIT_CODE} ;;`,
+    '    esac',
+    '  done',
+    'fi',
+    // Credentials were read only to validate the shared turn binding. Git's
+    // existing askpass reads them separately through the governed bytedcli.
+    'unset BYTEDCLI_USER_CLOUD_JWT BYTEDCLI_USER_CODE_JWT BOTMUX_GIT_AUTHOR_NAME BOTMUX_GIT_AUTHOR_EMAIL',
+    `exec ${shellSingleQuote(realGitPath)} -c user.name="$GIT_COMMITTER_NAME" -c user.email="$GIT_COMMITTER_EMAIL" "$@"`,
+    '',
+  ].join('\n');
+}
+
+export function renderIdentityWrapper(tool: TriggerUserAuthTool, realBinaryPath: string): string {
+  const exportKeys = IDENTITY_ENV_KEYS[tool].join(' ');
+  return [
+    ...identityPrelude(tool),
     `case "$${MODE_VAR}" in`,
     '  user|bot)',
     `    export ${exportKeys}`,
@@ -962,7 +1036,7 @@ export function gitIdentityConfigEnv(
  * excluding the wrapper dir keeps that impossible by construction.
  */
 export function findRealToolBinary(
-  tool: TriggerUserAuthTool,
+  tool: TriggerUserAuthTool | 'git',
   pathValue: string | undefined,
   excludeDirs: readonly string[] = [],
 ): string | null {
@@ -1058,6 +1132,10 @@ export function prepareTriggerUserCliEnv(
   // per-turn identity with no second credential path to keep in sync.
   if (policy.tools.includes('bytedcli')
       && identityWrapperInstalled(wrapperDir, 'bytedcli')) {
+    const realGit = findRealToolBinary('git', childEnv.PATH, [wrapperDir]);
+    // Installation errors propagate: silently falling back would attribute
+    // future commits to the host. A host without Git cannot create commits.
+    if (realGit) atomicWriteFileSync(join(wrapperDir, 'git'), renderGitAuthorWrapper(realGit), { mode: 0o755 });
     try {
       const askpass = installGitAskpass(
         wrapperDir,

@@ -28,7 +28,7 @@ vi.mock('../src/utils/user-token.js', () => ({
 }));
 
 // bytedcli shells out to the real CLI; here we control who is authorized.
-const bytedcliJwts = new Map<string, { cloudJwt: string; codeJwt?: string }>();
+const bytedcliJwts = new Map<string, { cloudJwt: string; codeJwt?: string; gitAuthor?: { name: string; email: string } }>();
 vi.mock('../src/services/bytedcli-auth.js', () => ({
   mintBytedcliJwts: vi.fn(async (openId: string) => bytedcliJwts.get(openId) ?? null),
   beginBytedcliLogin: vi.fn(async () => ({
@@ -490,7 +490,7 @@ describe('target daemon consumes signed message authority', () => {
       await h.run(turnId);
       publishActiveTurn(dir, SESSION, turnId);
       const result = spawnSync('/bin/sh', [wrapper, tool === 'bytedcli' ? 'BYTEDCLI_USER_CLOUD_JWT' : 'HOME'], {
-        env: { SESSION_DATA_DIR: dir, BOTMUX_SESSION_ID: SESSION }, encoding: 'utf8',
+        env: { SESSION_DATA_DIR: dir, BOTMUX_SESSION_ID: SESSION, TMPDIR: dir }, encoding: 'utf8',
       });
       expect(result.status, result.stderr).toBe(0);
       expect(result.stdout.trim()).toBe(tool === 'bytedcli' ? 'scheduled-alice' : home);
@@ -500,7 +500,7 @@ describe('target daemon consumes signed message authority', () => {
     bytedcliJwts.set(BOB, { cloudJwt: 'bob-cloud' });
     await publish(botConfig({ enabled: true, tools: [tool] }), BOB, 'om_bob');
     const stale = spawnSync('/bin/sh', [wrapper], {
-      env: { SESSION_DATA_DIR: dir, BOTMUX_SESSION_ID: SESSION }, encoding: 'utf8',
+      env: { SESSION_DATA_DIR: dir, BOTMUX_SESSION_ID: SESSION, TMPDIR: dir }, encoding: 'utf8',
     });
     expect(stale.status).toBe(77);
   });
@@ -703,4 +703,14 @@ it('does not begin another login when the bytedcli provider fails', async () => 
   const written = readFileSync(sessionIdentityPath(dir, SESSION, 'bytedcli'), 'utf8');
   expect(written).toContain('停止自动重试');
   expect(written).not.toContain('old-sender-credential');
+});
+
+it('publishes verified Git profile and clears it when the next sender lacks authorization', async () => {
+  const cfg = botConfig({ enabled: true, tools: ['bytedcli'], fallback: 'none' });
+  bytedcliJwts.set(ALICE, { cloudJwt: 'fixture', gitAuthor: { name: 'Alice', email: 'alice@example.test' } });
+  await publish(cfg, ALICE, 'turn-a');
+  const path = sessionIdentityPath(dir, SESSION, 'bytedcli');
+  expect(readFileSync(path, 'utf8')).toContain("BOTMUX_GIT_AUTHOR_EMAIL='alice@example.test'");
+  await publish(cfg, BOB, 'turn-b');
+  expect(readFileSync(path, 'utf8')).not.toContain('alice@example.test');
 });

@@ -72,3 +72,12 @@ and the original CLI's cache-first behavior. Then use two authorized humans in
 fresh bot conversations: A's successful request, B's unauthenticated request,
 B's own authorization, and the resulting MR authors. Keep login links private.
 Document this human acceptance separately from automated fixtures.
+
+## Git 提交署名
+
+启用 bytedcli 发起人身份策略时，daemon 通过同一人的隔离授权调用 `auth userinfo`，只接受个人账号返回的姓名和邮箱。每轮发布到会话身份文件；受管 `git` 命令逐次读取，给新提交同时设置 Author 和 Committer。共享仓库与宿主 Git 配置保持原样。
+
+- 身份、姓名/邮箱或活跃轮次缺失时，创建提交被拒绝；`status`、`diff` 等读取仍可运行。
+- 普通新提交跟随当前发起人；`amend`、`rebase`、`cherry-pick`、`am` 等历史操作沿用 Git 的原作者保留语义，Committer 使用当前身份。需要重置 amend 的作者时使用 Git 自身的 `--reset-author`。
+- Agent 使用 PATH 中的 `git`，避免指定绝对路径、修改共享配置或覆盖 `--author`。该入口提供自动署名，Git 元数据本身仍可由其他入口改写；平台授权与推送审计独立处理。
+- 新版本首次部署后需在新会话验收 A/B 提交、未授权拒绝及真实 bwrap 路径；旧会话需刷新运行入口与下一轮身份资料后才能使用此能力。

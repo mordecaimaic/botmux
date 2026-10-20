@@ -160,7 +160,7 @@ async function publishDelegated(tool: TriggerUserAuthTool, args: PublishTurnIden
     // Keep the issuer-scoped credential key; do not copy a source open_id into
     // the target app or duplicate/extend the lifetime of the user's login.
     const jwt = await mintBytedcliJwts(user.credentialOpenId);
-    if (jwt) identity = { tool, cloudJwt: jwt.cloudJwt, ...(jwt.codeJwt ? { codeJwt: jwt.codeJwt } : {}) };
+    if (jwt) identity = { tool, ...(jwt.gitAuthor ? { gitAuthor: jwt.gitAuthor } : {}), cloudJwt: jwt.cloudJwt, ...(jwt.codeJwt ? { codeJwt: jwt.codeJwt } : {}) };
   } else {
     const home = await resolveLarkCliHomeForTurn(user.credentialOpenId);
     if (home) identity = { tool, mode: 'user-home', home };
@@ -372,5 +372,5 @@ async function resolveIdentityFor(
   // falling back to the machine's own SSO session.
   const jwts = await mintBytedcliJwts(senderOpenId);
   if (!jwts) return null;
-  return { tool: 'bytedcli', cloudJwt: jwts.cloudJwt, ...(jwts.codeJwt ? { codeJwt: jwts.codeJwt } : {}) };
+  return { tool: 'bytedcli', ...(jwts.gitAuthor ? { gitAuthor: jwts.gitAuthor } : {}), cloudJwt: jwts.cloudJwt, ...(jwts.codeJwt ? { codeJwt: jwts.codeJwt } : {}) };
 }
