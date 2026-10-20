@@ -22,8 +22,8 @@
  *
  * Paths that don't exist are skipped (the mask compiler existence-filters).
  */
-import { existsSync, lstatSync, readdirSync } from 'node:fs';
-import { join, dirname, basename } from 'node:path';
+import { existsSync, lstatSync, readdirSync, realpathSync } from 'node:fs';
+import { join, dirname, basename, resolve, sep } from 'node:path';
 import { homedir as osHomedir } from 'node:os';
 import { resolveLarkCliLinuxStoreDir } from '../cli/fs-policy.js';
 
@@ -44,6 +44,8 @@ export interface ScratchSecretInput {
    *  <sid>.<tool>.env/.bin/.turn files are returned as read-only carve paths
    *  (the governed CLI + `botmux send` need them). */
   sessionId?: string;
+  /** Only this session may access this writable subtree of session-tmp. */
+  sessionScratchDir?: string;
 }
 
 export interface ScratchSecrets {
@@ -51,6 +53,7 @@ export interface ScratchSecrets {
   denyPaths: string[];
   /** Paths re-opened READ-ONLY inside an otherwise denied dir. */
   readOnlyCarvePaths: string[];
+  writableCarvePaths: string[];
 }
 
 // Trigger-user CLI identity lives in ONE per-session directory
@@ -73,13 +76,28 @@ function isDir(p: string): boolean {
   try { return lstatSync(p).isDirectory(); } catch { return false; }
 }
 
+function canonical(p: string): string {
+  try { return realpathSync(p); } catch { return resolve(p); }
+}
+
 export function enumerateScratchSecretPaths(input: ScratchSecretInput): ScratchSecrets {
   const out = new Set<string>();
   const readOnlyCarve = new Set<string>();
+  const writableCarve = new Set<string>();
   const homeDir = input.homeDir || osHomedir();
   const addFile = (p: string | undefined): void => {
     if (p && isFileOrLink(p)) out.add(p);
   };
+
+  // Applied to every scratch session, including bots without trigger-user auth.
+  const sessionTempRoot = canonical(resolve(homeDir, '.cache', 'botmux', 'session-tmp'));
+  if (isDir(sessionTempRoot)) out.add(sessionTempRoot);
+  if (input.sessionScratchDir) {
+    const ownScratch = canonical(input.sessionScratchDir);
+    if (ownScratch.startsWith(`${sessionTempRoot}${sep}`) && isDir(input.sessionScratchDir)) {
+      writableCarve.add(ownScratch);
+    }
+  }
 
   for (const home of input.botmuxHomes) {
     let entries: string[];
@@ -175,7 +193,7 @@ export function enumerateScratchSecretPaths(input: ScratchSecretInput): ScratchS
     if (existsSync(p)) out.add(p);
   }
 
-  return { denyPaths: [...out], readOnlyCarvePaths: [...readOnlyCarve] };
+  return { denyPaths: [...out], readOnlyCarvePaths: [...readOnlyCarve], writableCarvePaths: [...writableCarve] };
 }
 
 /** Back-compat flat list (deny + ro-carve are all "secret-adjacent"); used by

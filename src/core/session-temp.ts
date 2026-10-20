@@ -14,7 +14,7 @@ function sessionTempSegment(sessionId: string): string {
   return `sha256-${createHash('sha256').update(sessionId).digest('hex')}`;
 }
 
-function sessionTempRoot(): string {
+export function sessionTempRootDir(): string {
   return join(homedir(), '.cache', 'botmux', 'session-tmp');
 }
 
@@ -38,12 +38,12 @@ export function sessionTempDir(dataDir: string, sessionId: string): string {
   // that whole authority root, so placing temp under ~/.botmux would either be
   // denied or require a dangerous writable carve-out beside credentials.
   const key = createHash('sha256').update(sessionId).digest('hex').slice(0, 16);
-  return join(sessionTempRoot(), sessionTempProfile(dataDir, 8), key);
+  return join(sessionTempRootDir(), sessionTempProfile(dataDir, 8), key);
 }
 
 /** Pre-shortening layout, still owned by sessions created before the change. */
 function legacySessionTempDir(dataDir: string, sessionId: string): string {
-  return join(sessionTempRoot(), sessionTempProfile(dataDir, 16), sessionTempSegment(sessionId));
+  return join(sessionTempRootDir(), sessionTempProfile(dataDir, 16), sessionTempSegment(sessionId));
 }
 
 /** Create and validate the session scratch directory before exposing it. */
@@ -121,7 +121,7 @@ const SESSION_TEMP_ENV_KEYS = ['TMPDIR', 'TMP', 'TEMP'] as const;
  * paths are removed: an operator's own short TMPDIR is kept.
  */
 export function scrubSessionTempEnv(env: NodeJS.ProcessEnv): void {
-  const root = sessionTempRoot();
+  const root = sessionTempRootDir();
   for (const key of SESSION_TEMP_ENV_KEYS) {
     const value = env[key]?.trim();
     if (!value) continue;

@@ -438,12 +438,131 @@ export function clearAllSessionIdentities(sessionDataDir: string, sessionId: str
   } catch { /* best-effort: absence is the desired state */ }
 }
 
+const BYTEDCLI_AMBIENT_IDENTITY_KEYS = [
+  'BYTEDCLI_USER_CLOUD_JWT',
+  'BYTEDCLI_USER_CODE_JWT',
+  'BYTEDCLI_USER_CB_OAUTH_AT',
+  'BYTEDCLI_PROFILE',
+  'BYTEDCLI_CODEBASE_APP_ID',
+  'BYTEDCLI_CODEBASE_APP_SECRET',
+  'BYTEDCLI_CLOUD_SITE',
+  'BYTEDCLI_AUTH_SITE',
+  'BYTEDCLI_AI_AUTH_APP_KEY',
+  'BYTEDCLI_AI_AUTH_SUBJECT',
+  'BYTEDCLI_BYTECLOUD_AUTH_FALLBACK',
+  'BYTEDCLI_OCEANUS_AUTH',
+  'BYTEDCLI_USE_ZTI_JWT',
+  'AIPAAS_BYTECLAW',
+  'BYTECLOUD_CLI_API_JWT_TOKEN',
+  'BYTECLOUD_CLI_JWT_TOKEN',
+  'AIME_USER_CLOUD_JWT',
+  'AIME_USER_CODE_JWT',
+  'AIME_WORKSPACE_PATH',
+  'AIME_CURRENT_USER',
+  'BYTECLOUD_AUTH_ACCESS_KEY_ID',
+  'BYTECLOUD_AUTH_SECRET_ACCESS_KEY',
+  'BYTECLOUD_ACCESS_KEY_ID',
+  'BYTECLOUD_SECRET_ACCESS_KEY',
+  'BYTECLOUD_AUTH_AS',
+  'BYTECLOUD_CLI_API_JWT_TOKEN_CN',
+  'BYTECLOUD_CLI_API_JWT_TOKEN_I18N_TT',
+  'BYTECLOUD_CLI_API_JWT_TOKEN_I18N_BD',
+  'BYTECLOUD_CLI_API_JWT_TOKEN_EU_TTP',
+  'BYTECLOUD_CLI_API_JWT_TOKEN_US_TTP',
+] as const;
+
+/** Disposable bytedcli state, adapted from upstream PR #1796 (be1995c4).
+ * Keep daemon login homes persistent; derived SDK caches belong to one call.
+ */
+function bytedcliIsolatedExec(realBinaryPath: string): string[] {
+  const exportKeys = IDENTITY_ENV_KEYS.bytedcli.join(' ');
+  return [
+    '    for __botmux_arg in "$@"; do',
+    '      case "$__botmux_arg" in',
+    '        --as|--as=*|--bytecloud-user-jwt-file|--bytecloud-user-jwt-file=*)',
+    `          printf '%s\\n' 'botmux: bytedcli 身份由当前消息发起人固定，不能通过命令参数覆盖；命令未执行。' >&2`,
+    `          exit ${IDENTITY_DENIED_EXIT_CODE}`,
+    '          ;;',
+    '      esac',
+    '    done',
+    '    unset __botmux_arg',
+    // Use the session scratch already sealed by the filesystem policy. Never
+    // fall back to a shared host /tmp when the worker omitted its temp env.
+    '    case "$TMPDIR" in /*) ;; *) exit 77 ;; esac',
+    '    if [ ! -d "$TMPDIR" ] || [ -L "$TMPDIR" ]; then',
+    `      printf '%s\\n' 'botmux: bytedcli 会话临时目录缺失，命令未执行。' >&2`,
+    `      exit ${IDENTITY_DENIED_EXIT_CODE}`,
+    '    fi',
+    '    __botmux_bytedcli_base="$TMPDIR"',
+    '    umask 077',
+    '    command -p mkdir -p "$__botmux_bytedcli_base" || {',
+    `      printf '%s\\n' 'botmux: bytedcli 隔离认证目录创建失败，命令未执行。' >&2`,
+    `      exit ${IDENTITY_DENIED_EXIT_CODE}`,
+    '    }',
+    '    __botmux_bytedcli_home="$(command -p mktemp -d "$__botmux_bytedcli_base/bytedcli.XXXXXX")" || {',
+    `      printf '%s\\n' 'botmux: bytedcli 隔离认证目录创建失败，命令未执行。' >&2`,
+    `      exit ${IDENTITY_DENIED_EXIT_CODE}`,
+    '    }',
+    `    export ${exportKeys}`,
+    `    unset ${MODE_VAR} ${DENY_MSG_VAR} ${TURN_VAR} ${OPEN_ID_VAR} ${HOME_VAR}`,
+    '    __botmux_bytedcli_child=',
+    '    __botmux_bytedcli_forwarded=',
+    '    __botmux_bytedcli_cleanup() { command -p rm -rf -- "$__botmux_bytedcli_home"; }',
+    '    __botmux_bytedcli_forward() {',
+    '      __botmux_bytedcli_forwarded="$1"',
+    '      if [ -n "$__botmux_bytedcli_child" ]; then',
+    '        command -p kill -s "$1" "$__botmux_bytedcli_child" 2>/dev/null || :',
+    '      fi',
+    '    }',
+    "    trap '__botmux_bytedcli_forward HUP' HUP",
+    "    trap '__botmux_bytedcli_forward INT' INT",
+    "    trap '__botmux_bytedcli_forward TERM' TERM",
+    '    trap __botmux_bytedcli_cleanup EXIT',
+    '    exec 9<&0',
+    '    (',
+    // Non-interactive shells may make asynchronous children ignore INT/QUIT
+    // and attach stdin to /dev/null. Reset signal dispositions before exec and
+    // preserve fd 0 explicitly so governed CLIs keep normal PTY behavior.
+    '      trap - HUP INT TERM',
+    '      HOME="$__botmux_bytedcli_home" \\',
+    '        XDG_CONFIG_HOME="$__botmux_bytedcli_home/.config" \\',
+    '        XDG_DATA_HOME="$__botmux_bytedcli_home/.local/share" \\',
+    '        XDG_STATE_HOME="$__botmux_bytedcli_home/.local/state" \\',
+    '        XDG_CACHE_HOME="$__botmux_bytedcli_home/.cache" \\',
+    `        BYTEDCLI_NO_AUTO_UPGRADE=1 exec ${shellSingleQuote(realBinaryPath)} "$@"`,
+    '    ) <&9 9<&- &',
+    '    __botmux_bytedcli_child=$!',
+    '    exec 9<&-',
+    // A signal can land after the async child exists but before `$!` is stored.
+    // The trap records it even when no PID is available; replay it now so that
+    // narrow launch window cannot turn cancellation into an indefinite wait.
+    '    if [ -n "$__botmux_bytedcli_forwarded" ]; then',
+    '      command -p kill -s "$__botmux_bytedcli_forwarded" "$__botmux_bytedcli_child" 2>/dev/null || :',
+    '    fi',
+    '    while :; do',
+    '      wait "$__botmux_bytedcli_child"',
+    '      __botmux_bytedcli_status=$?',
+    // A caught signal may interrupt wait before the forwarded signal has made
+    // the child exit. Keep its HOME intact and wait again until it is reaped.
+    '      if [ -n "$__botmux_bytedcli_forwarded" ] \\',
+    '         && command -p kill -0 "$__botmux_bytedcli_child" 2>/dev/null; then',
+    '        continue',
+    '      fi',
+    '      break',
+    '    done',
+    '    trap - EXIT HUP INT TERM',
+    '    __botmux_bytedcli_cleanup',
+    '    exit "$__botmux_bytedcli_status"',
+  ];
+}
+
 /**
  * The wrapper script for one tool.
  *
  * Design constraints, each learned the hard way elsewhere in this codebase:
  *
- *  - `exec` so signals and the exit code pass straight through.
+ *  - Direct exec for stateless tools; bytedcli uses a signal-forwarding
+ *    supervisor to clean its invocation-scoped HOME after the child exits.
  *  - Absolute path to the real binary: the wrapper shadows the tool's own name
  *    on `PATH`, so resolving by name again would re-enter this script forever.
  *  - `BOTMUX_SESSION_ID` / `SESSION_DATA_DIR` come from the session env the
@@ -483,6 +602,7 @@ export function renderIdentityWrapper(tool: TriggerUserAuthTool, realBinaryPath:
     '#',
     '# No usable identity => the command does not run. Exec\'ing the tool bare',
     '# would hand it the machine account\'s login, not the bot\'s.',
+    ...(tool === 'bytedcli' ? [`unset ${BYTEDCLI_AMBIENT_IDENTITY_KEYS.join(' ')}`] : []),
     `${MODE_VAR}=`,
     `${DENY_MSG_VAR}=`,
     // Clear inherited copies before sourcing: a parent process that exports a
@@ -537,6 +657,7 @@ export function renderIdentityWrapper(tool: TriggerUserAuthTool, realBinaryPath:
     `case "$${MODE_VAR}" in`,
     '  user|bot)',
     `    export ${exportKeys}`,
+    ...(tool === 'bytedcli' ? bytedcliIsolatedExec(realBinaryPath) : []),
     '    ;;',
     '  user-home)',
     // Device-code identity. HOME is scoped to THIS exec only: assign it inline

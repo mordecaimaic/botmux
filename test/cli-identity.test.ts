@@ -707,7 +707,7 @@ describe('renderIdentityWrapper', () => {
     writeSessionIdentity(dir, SESSION, { tool: 'bytedcli', cloudJwt: 'jwt' });
     const out = execFileSync('/bin/sh', [wrapperPath], {
       encoding: 'utf8',
-      env: { PATH: '/usr/bin:/bin', SESSION_DATA_DIR: dir, BOTMUX_SESSION_ID: SESSION },
+      env: { PATH: '/usr/bin:/bin', TMPDIR: dir, SESSION_DATA_DIR: dir, BOTMUX_SESSION_ID: SESSION },
     });
     expect(out).toBe('unset');
   });
@@ -993,7 +993,7 @@ describe('tool-owning process identity environment', () => {
     const bin = join(dir, 'real-bin');
     mkdirSync(bin);
     writeFileSync(join(bin, 'bytedcli'), '#!/bin/sh\nprintf "%s" "$BYTEDCLI_USER_CLOUD_JWT"\n', { mode: 0o755 });
-    const env: NodeJS.ProcessEnv = { HOME: dir, PATH: `${bin}:/usr/bin:/bin` };
+    const env: NodeJS.ProcessEnv = { HOME: dir, TMPDIR: dir, PATH: `${bin}:/usr/bin:/bin` };
     prepareTriggerUserCliEnv(env, dir, SESSION, { enabled: true, tools: ['bytedcli'], fallback: 'none' }, () => {});
     const run = () => execFileSync('/bin/bash', ['-lc', 'bytedcli'], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     // No native/viewer CLI has been spawned. The model-owning process already
