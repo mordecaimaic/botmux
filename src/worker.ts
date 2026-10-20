@@ -72,7 +72,7 @@ import { publishCliSessionIdToDaemon } from './core/cli-session-id-publisher.js'
 import { ActiveTurnAuthority, type TurnAuthorityIdentity } from './core/active-turn-authority.js';
 import { readProcessStartIdentity } from './core/session-marker.js';
 import { roleLibraryRoot, roleLibrarySubtree } from './core/role-library.js';
-import { applySessionTempEnv, ensureSessionTempDir } from './core/session-temp.js';
+import { applySessionTempEnv, ensureSessionTempDir, sessionTempRootDir } from './core/session-temp.js';
 // Central no-transport predicate. Aliased because a local `const larkTransportEnabled`
 // (the role-library gate) already binds that name in one function scope.
 import { larkTransportEnabled as sessionLarkTransportEnabled } from './core/types.js';
@@ -18428,6 +18428,11 @@ async function spawnCli(
     BOTMUX_LARK_APP_ID: cfg.larkAppId,
     BOTMUX_SESSION_SCOPE: cfg.rootMessageId?.startsWith('om_') ? 'thread' : 'chat',
   };
+  // Codex/TraeX may sanitize inherited env. Pin the same session temp tree
+  // used by the filesystem policy for governed CLI subprocesses as well.
+  for (const key of ['TMPDIR', 'TMP', 'TEMP']) {
+    if (process.env[key]) identityShellEnv[key] = process.env[key]!;
+  }
   if (cfg.chatType) identityShellEnv.BOTMUX_CHAT_TYPE = cfg.chatType;
   if (cfg.rootMessageId?.startsWith('om_')) identityShellEnv.BOTMUX_ROOT_MESSAGE_ID = cfg.rootMessageId;
   if ((cfg.triggerUserAuth?.enabled || boundLark) && process.env.SESSION_DATA_DIR) {
@@ -19145,7 +19150,8 @@ async function spawnCli(
       }) ?? [],
       sandboxHome,
     );
-    const mandatoryDenyPaths: string[] = [];
+    // Seal sibling invocation caches; only the current session gets a deeper write grant.
+    const mandatoryDenyPaths: string[] = [canonical(sessionTempRootDir())];
     const hostOnlyDenyPaths: string[] = [join(canonical(dataDir), 'schedule-preconditions')];
     const mandatoryDenyRegexes: string[] = [];
     const mandatoryReadOnlyPaths: string[] = [];
@@ -19602,6 +19608,7 @@ async function spawnCli(
       botsConfigPath: cfg.loadedBotsConfigPath ? scratchCanonical(cfg.loadedBotsConfigPath) : undefined,
       homeDir: scratchHome,
       sessionId: cfg.sessionId,
+      sessionScratchDir,
     });
     const scratchDeny = [...new Set<string>([
       ...credentialRules.denyPaths.map(scratchCanonical),
@@ -19614,6 +19621,7 @@ async function spawnCli(
     // This session's own trigger-user identity files (under the sealed
     // cli-identity dir) must stay readable for the governed CLI / relay.
     const scratchReadOnlyCarves = scratchSecrets.readOnlyCarvePaths.map(scratchCanonical);
+    const scratchWritableCarves = scratchSecrets.writableCarvePaths.map(scratchCanonical);
 
     scratchNativeCodexHome = nativeCodexHome;
     scratchNativeTraeHome = nativeTraeHome;
@@ -19665,6 +19673,7 @@ async function spawnCli(
         cliBin: cliAdapter.resolvedBin,
         cliArgs: args,
         denyPaths: scratchDeny,
+        writableCarvePaths: scratchWritableCarves,
         mcpGatewaySocketPath: sessionMcpGatewayHost?.socketPath,
         net: cfg.sandboxNetwork !== false,
       });
@@ -19701,6 +19710,7 @@ async function spawnCli(
         cliBin: cliAdapter.resolvedBin,
         cliArgs: args,
         denyPaths: scratchDeny,
+        writableCarvePaths: scratchWritableCarves,
         shimBindTargets: [defaultGatewayEntry().command],
         mcpGatewaySocketPath: sessionMcpGatewayHost?.socketPath,
         childEnvForce: { CODEX_HOME: nativeCodexHome, TRAE_HOME: nativeTraeHome },

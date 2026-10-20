@@ -31,7 +31,7 @@ const assemble = new Function('cfg', 'process', 'sessionIdentityBinDir', 'join',
 function workerShellEnv(sessionDataDir: string | undefined, enabled = true, tools = ['bytedcli'], boundLark = false): Record<string, string> {
   return assemble(
     { sessionId: 'botmux-session', chatId: 'oc_chat', larkAppId: 'cli_app', triggerUserAuth: { enabled, tools } },
-    { env: sessionDataDir === undefined ? {} : { SESSION_DATA_DIR: sessionDataDir, BOTMUX_DAEMON_IPC_PORT: '12345' } },
+    { env: sessionDataDir === undefined ? {} : { SESSION_DATA_DIR: sessionDataDir, TMPDIR: sessionDataDir, BOTMUX_DAEMON_IPC_PORT: '12345' } },
     sessionIdentityBinDir, join, GIT_ASKPASS_BASENAME, 'native-session', boundLark, larkToolBindingPath, sessionDataDir,
   );
 }
@@ -54,6 +54,7 @@ describe('worker trigger-user shell contract', () => {
     expect(workerShellEnv(dataDir)).toEqual({
       ...routingEnv,
       SESSION_DATA_DIR: dataDir,
+      TMPDIR: dataDir,
       BOTMUX_IDENTITY_BIN: sessionIdentityBinDir(dataDir, 'botmux-session'),
       ZDOTDIR: join(sessionIdentityBinDir(dataDir, 'botmux-session'), 'shell'),
       BASH_ENV: join(sessionIdentityBinDir(dataDir, 'botmux-session'), 'shell', 'bash_env.sh'),
@@ -62,7 +63,7 @@ describe('worker trigger-user shell contract', () => {
   });
 
   it('retains routing without identity wrappers when auth is off or has no data root', () => {
-    expect(workerShellEnv('/tmp/data', false)).toEqual(routingEnv);
+    expect(workerShellEnv('/tmp/data', false)).toEqual({ ...routingEnv, TMPDIR: '/tmp/data' });
     expect(workerShellEnv(undefined)).toEqual(routingEnv);
   });
 
@@ -72,6 +73,7 @@ describe('worker trigger-user shell contract', () => {
     expect(workerShellEnv(dataDir, enabled, ['lark-cli'], true)).toEqual({
       ...routingEnv,
       SESSION_DATA_DIR: dataDir,
+      TMPDIR: dataDir,
       BOTMUX_IDENTITY_BIN: bin,
       ZDOTDIR: join(bin, 'shell'),
       BASH_ENV: join(bin, 'shell', 'bash_env.sh'),

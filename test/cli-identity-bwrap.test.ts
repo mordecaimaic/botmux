@@ -29,6 +29,7 @@ import {
   sessionIdentityBinDir,
   sessionIdentityPath,
   writeSessionIdentity,
+  installIdentityWrapper,
 } from '../src/core/cli-identity.js';
 import { rmSandboxScratch } from './helpers/rm-sandbox-scratch.js';
 
@@ -66,6 +67,7 @@ interface IdentityPolicyHarness {
   sessionId: string;
   identityPath: string;
   sessionDir: string;
+  scratch: string;
   args: string[];
 }
 
@@ -89,6 +91,11 @@ function compileIdentityPolicy(): IdentityPolicyHarness {
     tool: 'lark-cli', appId: 'cli_app', userAccessToken: 'token-first',
   });
   const sessionDir = sessionIdentityBinDir(dataDir, sessionId);
+  const tempRoot = join(homeDir, '.cache', 'botmux', 'session-tmp');
+  const scratch = join(tempRoot, 'profile', sessionId);
+  mkdirSync(scratch, { recursive: true });
+  mkdirSync(join(tempRoot, 'profile', 'sibling'), { recursive: true });
+  writeFileSync(join(tempRoot, 'profile', 'sibling', 'token'), 'SIBLING_CACHE');
   const policy = buildFsPolicy({
     platform: 'linux',
     homeDir,
@@ -101,6 +108,8 @@ function compileIdentityPolicy(): IdentityPolicyHarness {
     redirectedCliData: true,
     execPaths: [dirname(realpathSync(process.execPath))],
     userPaths: { readWrite: [ctlDir] },
+    mandatoryDenyPaths: [tempRoot],
+    extraWritePaths: [scratch],
     net: true,
     writeRegexes: [],
   });
@@ -140,7 +149,7 @@ function compileIdentityPolicy(): IdentityPolicyHarness {
       mkdirSync(mount.path, { recursive: true });
     }
   }
-  return { root, ctlDir, dataDir, sessionId, identityPath, sessionDir, args: compiled.args };
+  return { root, ctlDir, dataDir, sessionId, identityPath, sessionDir, scratch, args: compiled.args };
 }
 
 function compiledBinds(args: string[]): Array<{ mode: '--bind' | '--ro-bind'; source: string; target: string }> {
@@ -174,6 +183,33 @@ describe('compileToBwrap × trigger-user identity', () => {
 });
 
 describe.skipIf(!bwrapUsable())('bwrap persistent pane × trigger-user identity', () => {
+  it('runs the native bytedcli wrapper with an isolated writable HOME and sealed sibling caches', () => {
+    const h = compileIdentityPolicy();
+    try {
+      const tool = join(h.ctlDir, 'bytedcli-real');
+      writeFileSync(tool, '#!/bin/sh\nmkdir -p "$HOME/.local/share/bytedcli"\nprintf "%s" "$BYTEDCLI_USER_CLOUD_JWT" > "$HOME/.local/share/bytedcli/token"\nprintf "%s\\n" "$HOME"\ncat "$HOME/.local/share/bytedcli/token"\n', { mode: 0o755 });
+      const wrapper = installIdentityWrapper(h.sessionDir, 'bytedcli', tool)!;
+      writeSessionIdentity(h.dataDir, h.sessionId, { tool: 'bytedcli', cloudJwt: 'USER_B' });
+      const run = spawnSync('bwrap', [...h.args, '/usr/bin/env',
+        `SESSION_DATA_DIR=${h.dataDir}`, `BOTMUX_SESSION_ID=${h.sessionId}`,
+        `TMPDIR=${h.scratch}`, '/bin/sh', wrapper,
+      ], { encoding: 'utf8', timeout: 10_000 });
+      expect(run.stderr).toBe('');
+      expect(run.status).toBe(0);
+      const [home, identity] = run.stdout.split('\n');
+      expect(home.startsWith(`${h.scratch}/bytedcli.`)).toBe(true);
+      expect(identity).toBe('USER_B');
+      expect(existsSync(home)).toBe(false);
+      const sibling = spawnSync('bwrap', [...h.args, '/bin/cat',
+        join(dirname(h.scratch), 'sibling', 'token'),
+      ], { encoding: 'utf8', timeout: 10_000 });
+      expect(sibling.status).not.toBe(0);
+      expect(sibling.stdout).not.toContain('SIBLING_CACHE');
+    } finally {
+      rmSandboxScratch(h.root);
+    }
+  });
+
   it('reads an atomically replaced identity through the production directory bind', async () => {
     const harness = compileIdentityPolicy();
     const firstInode = statSync(harness.identityPath).ino;
