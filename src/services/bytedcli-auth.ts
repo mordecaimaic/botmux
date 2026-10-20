@@ -321,6 +321,8 @@ export interface BytedcliJwts {
   cloudJwt: string;
   /** Git pushes authenticate with this one, so commit attribution follows it. */
   codeJwt?: string;
+  /** Verified personal profile, separate from push authentication. */
+  gitAuthor?: { name: string; email: string };
 }
 
 /**
@@ -371,5 +373,24 @@ async function mintJwts(openId: string): Promise<BytedcliJwts | null> {
   if (!codeJwt) {
     logger.debug(`[bytedcli-auth] no Codebase JWT for ${openId}; git attribution will fall back`);
   }
-  return { cloudJwt, ...(codeJwt ? { codeJwt } : {}) };
+  // Resolve through the SAME isolated personal provider. A missing profile
+  // leaves API access intact, but Git must refuse to invent a commit identity.
+  const profile = await runAsUser(openId, ['auth', 'userinfo', '--json']);
+  const envelope = parseEnvelope(profile.stdout);
+  const gitAuthor = profile.ok && envelope?.status === 'success'
+    ? parseGitAuthorProfile(envelope.data) : undefined;
+  return { cloudJwt, ...(codeJwt ? { codeJwt } : {}), ...(gitAuthor ? { gitAuthor } : {}) };
+}
+
+/** Git ident fields are data, never shell/config syntax. No guessed email. */
+export function parseGitAuthorProfile(raw: unknown): { name: string; email: string } | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const p = raw as Record<string, unknown>;
+  if (p.type !== 'person_account' || typeof p.name !== 'string' || typeof p.email !== 'string') return undefined;
+  const name = p.name.trim();
+  const email = p.email.trim();
+  if (!name || name.length > 200 || /[<>\x00-\x1f\x7f]/.test(name)
+    || email.length > 254 || !/^[^\s<>@]+@[^\s<>@]+$/.test(email)
+    || /[\x00-\x1f\x7f]/.test(email)) return undefined;
+  return { name, email };
 }

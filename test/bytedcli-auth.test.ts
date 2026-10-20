@@ -22,6 +22,7 @@ import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 
 /** Every `bytedcli` invocation this test file caused: argv plus the HOME it ran under. */
+const profiles = new Map<string, { code: number; stdout?: string }>();
 const statuses = new Map<string, { code: number; stdout?: string; stderr?: string }>();
 const statusCalls: Array<{ home: string | undefined; identity?: string }> = [];
 const calls: Array<{ args: string[]; home: string | undefined }> = [];
@@ -30,10 +31,11 @@ let replies: Array<{ code: number; stdout?: string; stderr?: string }> = [];
 
 vi.mock('node:child_process', () => ({
   spawn: vi.fn((_cmd: string, args: string[], opts: { env?: Record<string, string> }) => {
+    const profile = args[0] === 'auth' && args[1] === 'userinfo';
     const status = args[0] === 'auth' && args[1] === 'status';
     if (status) statusCalls.push({ home: opts?.env?.HOME, identity: opts?.env?.BYTECLOUD_AUTH_AS });
-    else calls.push({ args, home: opts?.env?.HOME });
-    const reply = status ? (statuses.get(opts?.env?.HOME ?? '') ?? { code: 0, stdout: envelope({ authenticated: false }) })
+    else if (!profile) calls.push({ args, home: opts?.env?.HOME });
+    const reply = profile ? (profiles.get(opts?.env?.HOME ?? '') ?? { code: 1 }) : status ? (statuses.get(opts?.env?.HOME ?? '') ?? { code: 0, stdout: envelope({ authenticated: false }) })
       : replies.shift() ?? { code: 0, stdout: '' };
     const child = new EventEmitter() as EventEmitter & {
       stdout: EventEmitter; stderr: EventEmitter; kill: () => void;
@@ -70,6 +72,7 @@ beforeEach(() => {
   calls.length = 0;
   replies = [];
   statuses.clear();
+  profiles.clear();
   statusCalls.length = 0;
 });
 afterEach(() => { rmSync(home, { recursive: true, force: true }); });
@@ -482,5 +485,16 @@ describe('provider timeout', () => {
     } finally { vi.useRealTimers(); }
     replies = [{ code: 0, stdout: envelope({ verification_uri_complete: 'https://example.test/login', complete_token: 'retry' }) }];
     expect((await mod.beginBytedcliLogin(ALICE))?.completeToken).toBe('retry');
+  });
+});
+
+describe('verified Git author lookup', () => {
+  it('uses the isolated personal provider and keeps profiles separate', async () => {
+    const mod = await fresh(); authorize(mod, ALICE); authorize(mod, BOB);
+    for (const [id, name, email] of [[ALICE, 'Alice', 'alice@example.test'], [BOB, 'Bob', 'bob@example.test']]) {
+      profiles.set(mod.bytedcliHomeFor(id), { code: 0, stdout: envelope({ type: 'person_account', name, email }) });
+      replies = [{ code: 0, stdout: 'cloud.fixture' }, { code: 0, stdout: 'code.fixture' }];
+      expect((await mod.mintBytedcliJwts(id))?.gitAuthor).toEqual({ name, email });
+    }
   });
 });

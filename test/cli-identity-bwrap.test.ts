@@ -30,6 +30,8 @@ import {
   sessionIdentityPath,
   writeSessionIdentity,
   installIdentityWrapper,
+  renderGitAuthorWrapper,
+  publishActiveTurn,
 } from '../src/core/cli-identity.js';
 import { rmSandboxScratch } from './helpers/rm-sandbox-scratch.js';
 
@@ -183,6 +185,35 @@ describe('compileToBwrap × trigger-user identity', () => {
 });
 
 describe.skipIf(!bwrapUsable())('bwrap persistent pane × trigger-user identity', () => {
+  it('attributes real Git commits to the active user inside the production sandbox', () => {
+    const h = compileIdentityPolicy();
+    try {
+      const repo = join(h.root, 'project');
+      const wrapper = join(h.sessionDir, 'git');
+      writeFileSync(wrapper, renderGitAuthorWrapper('/usr/bin/git'), { mode: 0o755 });
+      expect(spawnSync('/usr/bin/git', ['-C', repo, 'init', '-q']).status).toBe(0);
+      for (const user of ['alice', 'bob']) {
+        writeSessionIdentity(h.dataDir, h.sessionId, { tool: 'bytedcli', cloudJwt: 'fixture',
+          turnId: user, openId: `ou_${user}`, gitAuthor: { name: user, email: `${user}@example.test` } });
+        publishActiveTurn(h.dataDir, h.sessionId, user, 1, `ou_${user}`);
+        const run = spawnSync('bwrap', [...h.args, '/usr/bin/env',
+          `SESSION_DATA_DIR=${h.dataDir}`, `BOTMUX_SESSION_ID=${h.sessionId}`,
+          'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1',
+          wrapper, 'commit', '--allow-empty', '-m', user,
+        ], { encoding: 'utf8', timeout: 10_000 });
+        expect(run.status, run.stderr).toBe(0);
+        const log = spawnSync('/usr/bin/git', ['-C', repo, 'log', '-1', '--format=%ae|%ce'], { encoding: 'utf8' });
+        expect(log.stdout.trim()).toBe(`${user}@example.test|${user}@example.test`);
+      }
+      publishActiveTurn(h.dataDir, h.sessionId, 'unauthorized', 1, 'ou_other');
+      const denied = spawnSync('bwrap', [...h.args, '/usr/bin/env',
+        `SESSION_DATA_DIR=${h.dataDir}`, `BOTMUX_SESSION_ID=${h.sessionId}`,
+        wrapper, 'commit', '--allow-empty', '-m', 'must-refuse',
+      ], { encoding: 'utf8', timeout: 10_000 });
+      expect(denied.status).toBe(77);
+    } finally { rmSandboxScratch(h.root); }
+  });
+
   it('runs the native bytedcli wrapper with an isolated writable HOME and sealed sibling caches', () => {
     const h = compileIdentityPolicy();
     try {
