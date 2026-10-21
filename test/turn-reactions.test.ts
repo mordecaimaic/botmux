@@ -330,7 +330,10 @@ describe('two-phase turn reactions', () => {
     getBot(APP).config.triggerUserAuth = { enabled: true, tools: ['bytedcli'], fallback: 'none' };
     const ds = makeDs();
     ds.session.replyTargets = {
-      om_b: { rootMessageId: 'om_root', senderOpenId: 'ou_bob', updatedAt: new Date().toISOString() },
+      om_b: {
+        rootMessageId: 'om_root', senderOpenId: 'ou_bob', updatedAt: new Date().toISOString(),
+        participants: [{ openId: 'ou_bob', isBot: false }],
+      },
     };
     let release!: () => void;
     const identityPending = new Promise<void>(resolve => { release = resolve; });
