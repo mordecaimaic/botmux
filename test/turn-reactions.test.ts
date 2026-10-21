@@ -20,6 +20,7 @@ import { join } from 'path';
 const mocks = vi.hoisted(() => ({
   addReaction: vi.fn(),
   removeReaction: vi.fn(),
+  publishTurnCliIdentity: vi.fn(),
 }));
 
 vi.mock('@larksuiteoapi/node-sdk', () => {
@@ -40,6 +41,11 @@ vi.mock('node-pty', () => ({
 vi.mock('../src/im/lark/client.js', async () => {
   const actual = await vi.importActual<any>('../src/im/lark/client.js');
   return { ...actual, addReaction: mocks.addReaction, removeReaction: mocks.removeReaction };
+});
+
+vi.mock('../src/core/turn-cli-identity.js', async () => {
+  const actual = await vi.importActual<any>('../src/core/turn-cli-identity.js');
+  return { ...actual, publishTurnCliIdentity: mocks.publishTurnCliIdentity };
 });
 
 import { getBot, registerBot } from '../src/bot-registry.js';
@@ -86,6 +92,7 @@ describe('two-phase turn reactions', () => {
     sessionStore.init(APP);
     mocks.addReaction.mockImplementation(async (_app: string, msgId: string) => `rid_${msgId}`);
     mocks.removeReaction.mockResolvedValue(undefined);
+    mocks.publishTurnCliIdentity.mockReset().mockResolvedValue([]);
   });
 
   it('streaming card on (default): no reaction on receipt', async () => {
@@ -315,6 +322,67 @@ describe('two-phase turn reactions', () => {
     expect(mocks.removeReaction).toHaveBeenCalledWith(APP, 'om_b', 'rid_om_b');
     expect(mocks.addReaction).toHaveBeenCalledWith(APP, 'om_b', 'DONE');
     expect(ds.pendingAckReactions).toEqual([]);
+  });
+
+  it.each(['codex', 'claude-code'] as const)('acknowledges before slow identity preparation and keeps dispatch waiting (%s)', async cliId => {
+    registerWith(true);
+    getBot(APP).config.cliId = cliId;
+    getBot(APP).config.triggerUserAuth = { enabled: true, tools: ['bytedcli'], fallback: 'none' };
+    const ds = makeDs();
+    ds.session.replyTargets = {
+      om_b: {
+        rootMessageId: 'om_root', senderOpenId: 'ou_bob', updatedAt: new Date().toISOString(),
+        participants: [{ openId: 'ou_bob', isBot: false }],
+      },
+    };
+    let release!: () => void;
+    const identityPending = new Promise<void>(resolve => { release = resolve; });
+    mocks.publishTurnCliIdentity.mockImplementationOnce(async () => {
+      expect(mocks.addReaction).toHaveBeenCalledWith(APP, 'om_b', 'GoGoGo');
+      await identityPending;
+      return [];
+    });
+    let dispatchReady = false;
+    const note = noteTurnReceived(ds, 'om_b').then(() => { dispatchReady = true; });
+    await vi.waitFor(() => expect(mocks.publishTurnCliIdentity).toHaveBeenCalled());
+    expect(mocks.publishTurnCliIdentity).toHaveBeenCalledWith(expect.objectContaining({
+      senderOpenId: 'ou_bob', turnId: 'om_b', sessionId: ds.session.sessionId,
+    }));
+    expect(dispatchReady).toBe(false);
+    // An older turn can finish during auth. It must leave this new receipt alone.
+    await finishTurnReactions(ds);
+    expect(ds.pendingAckReactions ?? []).toEqual([]);
+    expect(mocks.removeReaction).not.toHaveBeenCalled();
+    expect(mocks.addReaction).not.toHaveBeenCalledWith(APP, 'om_b', 'DONE');
+    release();
+    await note;
+    expect(dispatchReady).toBe(true);
+    expect(ds.pendingAckReactions).toEqual([{ messageId: 'om_b', reactionId: 'rid_om_b' }]);
+    await finishTurnReactions(ds);
+    expect(mocks.addReaction).toHaveBeenCalledWith(APP, 'om_b', 'DONE');
+  });
+
+  it.each(['card-on', 'silent', 'non-message', 'duplicate', 'reaction-failed'])('still prepares identity when receipt is skipped or fails: %s', async mode => {
+    registerWith(mode !== 'card-on', { silentTurnReactions: mode === 'silent' });
+    getBot(APP).config.triggerUserAuth = { enabled: true, tools: ['bytedcli'], fallback: 'none' };
+    const ds = makeDs();
+    if (mode === 'duplicate') ds.pendingAckReactions = [{ messageId: 'om_b', reactionId: 'existing' }];
+    if (mode === 'reaction-failed') mocks.addReaction.mockRejectedValueOnce(new Error('Lark unavailable'));
+    const message = mode === 'non-message' ? 'comment_b' : 'om_b';
+    await noteTurnReceived(ds, message);
+    expect(mocks.publishTurnCliIdentity).toHaveBeenCalledOnce();
+    expect(mocks.publishTurnCliIdentity).toHaveBeenCalledWith(expect.objectContaining({ turnId: message }));
+  });
+
+  it('retires the early receipt and rejects dispatch on unexpected identity preparation failure', async () => {
+    registerWith(true);
+    getBot(APP).config.triggerUserAuth = { enabled: true, tools: ['bytedcli'], fallback: 'none' };
+    const ds = makeDs();
+    mocks.publishTurnCliIdentity.mockRejectedValueOnce(new Error('identity publication failed'));
+    await expect(noteTurnReceived(ds, 'om_b')).rejects.toThrow('identity publication failed');
+    expect(mocks.removeReaction).toHaveBeenCalledWith(APP, 'om_b', 'rid_om_b');
+    expect(ds.pendingAckReactions ?? []).toEqual([]);
+    expect(mocks.addReaction).not.toHaveBeenCalledWith(APP, 'om_b', 'DONE');
   });
 
   it('finishTurnReactions with no pending acks is a no-op', async () => {

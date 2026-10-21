@@ -81,3 +81,11 @@ Document this human acceptance separately from automated fixtures.
 - 普通新提交跟随当前发起人；`amend`、`rebase`、`cherry-pick`、`am` 等历史操作沿用 Git 的原作者保留语义，Committer 使用当前身份。需要重置 amend 的作者时使用 Git 自身的 `--reset-author`。
 - Agent 使用 PATH 中的 `git`，避免指定绝对路径、修改共享配置或覆盖 `--author`。该入口提供自动署名，Git 元数据本身仍可由其他入口改写；平台授权与推送审计独立处理。
 - 新版本首次部署后需在新会话验收 A/B 提交、未授权拒绝及真实 bwrap 路径；旧会话需刷新运行入口与下一轮身份资料后才能使用此能力。
+
+## 收到表情与身份准备顺序
+
+普通消息通过准入后，`noteTurnReceived` 先发送收到表情，再等待当前轮次的 CLI 身份发布；调用方仍须等待该函数完成后才向 worker 派发输入。表情表示消息已接收，平台操作仍由发起人的授权决定。
+
+身份刷新放在 `finally` 中，覆盖流式卡片、静默表情、重复消息、文档评论及表情 API 失败的分支。只有表情成功且身份准备返回后才登记待完成表情，避免上一轮 idle 在授权等待期间将本轮提前标为完成。身份准备意外抛错时清理已发送表情并保留异常；正常的未授权状态仍由原有拒绝凭据路径处理。
+
+回归检查：`test/turn-reactions.test.ts`、`test/rate-limit-notify.test.ts`、`test/turn-cli-identity.test.ts`、`test/cli-identity.test.ts`、`test/bytedcli-auth.test.ts`、`test/bytedcli-cache-isolation.test.ts`、`test/git-author-identity.test.ts`、`test/cli-identity-bwrap.test.ts`、`test/doc-comment-daemon-concurrency.test.ts`。包含 Codex/Claude Code、表情开关、上一轮 idle 竞态、身份失败、跨用户拒绝与 Linux bwrap 隔离。飞书客户端的完整可见延迟另行实测，CLI 授权耗时仅是链路中的一段。
