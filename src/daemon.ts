@@ -68,7 +68,7 @@ import { botmuxVersion } from './utils/install-info.js';
 import { SESSION_STORE_PROTOCOL } from './utils/daemon-version-display.js';
 import { readSupervisorProcessStartIdentity } from './core/process-start-identity.js';
 import { statSync } from 'node:fs';
-import { addReaction, deleteMessage, getChatContext, getChatMode, getChatModeStrict, getChatNameAndMode, getMessageChatId, getMessageDetail, lookupMessageChatId, listChatMemberOpenIds, listChatMessages, listThreadMessages, MessageWithdrawnError, patchCardStreamElement, replyMessage, resolveAllowedUsersWithMap, resolveCurrentChatBotOpenIdsByLarkAppIds, resolveTargetAppOpenId, sendMessage, sendUserMessage, updateCardStreamElementContent, updateMessage, type EntryResolveStatus } from './im/lark/client.js';
+import { addReaction, removeReaction, deleteMessage, getChatContext, getChatMode, getChatModeStrict, getChatNameAndMode, getMessageChatId, getMessageDetail, lookupMessageChatId, listChatMemberOpenIds, listChatMessages, listThreadMessages, MessageWithdrawnError, patchCardStreamElement, replyMessage, resolveAllowedUsersWithMap, resolveCurrentChatBotOpenIdsByLarkAppIds, resolveTargetAppOpenId, sendMessage, sendUserMessage, updateCardStreamElementContent, updateMessage, type EntryResolveStatus } from './im/lark/client.js';
 import { resolveGroupJoinPrompt, waitForAllowedUserInChat } from './core/auto-start.js';
 import {
   loadBotConfigAtIndex,
@@ -3885,63 +3885,69 @@ export async function noteTurnReceived(
     // Keep recent timestamps for delivery retries; unknown/evicted turns omit waiting time.
     if (received.size > 512) received.delete(received.keys().next().value!);
   }
-  // Trigger-user CLI auth: publish (or withhold) the acting identity for THIS
-  // turn. This is the per-message acceptance point — every inbound turn passes
-  // through here before reaching the worker — so it is the one place that can
-  // guarantee no turn runs with the previous sender's credentials still on disk.
-  // It precedes the reaction bookkeeping and its early returns: a card-on session
-  // returns below, but its turns need the identity refreshed just the same.
-  //
-  // The enablement check is SYNCHRONOUS on purpose. An unconditional `await`
-  // here would yield a microtask before the bookkeeping below on every turn of
-  // every bot, reordering concurrent turns that the single-flight paths depend
-  // on. A feature that is off must not perturb timing at all, so the await only
-  // happens once a bot has actually opted in.
-  if (triggerUserAuthEnabledFor(ds)) {
-    await refreshTurnCliIdentity(ds, _turnId ?? triggerMessageId);
-  }
-  // Replaces the old 「处理中」 placeholder card. That card existed only to be
-  // PATCHed with the final answer, and `im.v1.message.patch` is silent (no Feishu
-  // notification / unread) — so card-off answers could land unseen. The
-  // placeholder + patch-delivery was removed; answers now always go out as a
-  // fresh message (deliverFinalOutput / `botmux send`).
-  //
-  // This call site is the per-message acceptance point, so it also drives the
-  // two-phase turn reaction. It's auto-enabled exactly for card-off sessions
-  // (streaming card disabled): those have no live status card, so the ✋→✅ on
-  // the user's message is the only lightweight progress signal. Bots can opt
-  // out via silentTurnReactions for low-noise observer scenarios.
-  // React 冲! on the triggering message the instant it's accepted. Binding to the
-  // message — not a worker status edge — means type-ahead / busy-batched messages
-  // each get their own ✋. `finishTurnReactions` flips every pending ✋ to ✅ when
-  // the worker next goes idle.
-  // Plan B: a meeting agent is an ordinary chat-scope session that hosts plain
-  // user turns. A plain user message should get the ✋→✅ progress reaction like
-  // any card-off session. Only a stamped meeting @mention follow-up stays
-  // reaction-free (it is meeting-driven and routes through the audited listener
-  // action, not the ordinary progress-reaction channel). Transcript deliveries
-  // never reach this inbound-message acceptance point at all.
-  if (ds.session.vcMeetingReceiver
-    && resolveVcMeetingImTurnOrigin(ds.session, triggerMessageId) !== undefined) return;
-  // Turn-exact card-off check: the reaction ack belongs to THIS message's turn,
-  // not to whichever turn most recently overwrote currentReplyTarget.
-  if (!streamingCardDisabledFor(ds, triggerMessageId)) return;
-  if (silentTurnReactionsFor(ds)) return;
-  // Only Lark messages carry reactions — doc-comment ids / chat anchors can't.
-  if (!triggerMessageId.startsWith('om_')) return;
-  if ((ds.pendingAckReactions ??= []).some(a => a.messageId === triggerMessageId)) return;
-  // Add the ✋ FIRST, register the entry only after it lands. If we pushed the
-  // entry before awaiting addReaction, a previous turn's idle edge
-  // (finishTurnReactions) could detach this half-formed entry mid-flight —
-  // DONE-ing a message that hasn't even reached the worker yet and orphaning its
-  // reactionId. Callers await this before dispatching the message to the worker,
-  // so a registered entry is always in place before its own turn can go idle.
-  let reactionId: string;
+  // The receipt acknowledges admission only. Keep slow CLI identity work after
+  // this lightweight feedback, but awaited before any caller dispatches input.
+  let reactionId: string | undefined;
   try {
-    reactionId = await addReaction(ds.larkAppId, triggerMessageId, receivedReactionEmoji ?? receivedReactionEmojiFor(ds));
-  } catch (err) {
-    logger.debug(`[reaction] received add failed for ${triggerMessageId}: ${err instanceof Error ? err.message : String(err)}`);
-    return;
+    // Replaces the old 「处理中」 placeholder card. That card existed only to be
+    // PATCHed with the final answer, and `im.v1.message.patch` is silent (no Feishu
+    // notification / unread) — so card-off answers could land unseen. The
+    // placeholder + patch-delivery was removed; answers now always go out as a
+    // fresh message (deliverFinalOutput / `botmux send`).
+    //
+    // This call site is the per-message acceptance point, so it also drives the
+    // two-phase turn reaction. It's auto-enabled exactly for card-off sessions
+    // (streaming card disabled): those have no live status card, so the ✋→✅ on
+    // the user's message is the only lightweight progress signal. Bots can opt
+    // out via silentTurnReactions for low-noise observer scenarios.
+    // React 冲! on the triggering message the instant it's accepted. Binding to the
+    // message — not a worker status edge — means type-ahead / busy-batched messages
+    // each get their own ✋. `finishTurnReactions` flips every pending ✋ to ✅ when
+    // the worker next goes idle.
+    // Plan B: a meeting agent is an ordinary chat-scope session that hosts plain
+    // user turns. A plain user message should get the ✋→✅ progress reaction like
+    // any card-off session. Only a stamped meeting @mention follow-up stays
+    // reaction-free (it is meeting-driven and routes through the audited listener
+    // action, not the ordinary progress-reaction channel). Transcript deliveries
+    // never reach this inbound-message acceptance point at all.
+    if (ds.session.vcMeetingReceiver
+      && resolveVcMeetingImTurnOrigin(ds.session, triggerMessageId) !== undefined) return;
+    // Turn-exact card-off check: the reaction ack belongs to THIS message's turn,
+    // not to whichever turn most recently overwrote currentReplyTarget.
+    if (!streamingCardDisabledFor(ds, triggerMessageId)) return;
+    if (silentTurnReactionsFor(ds)) return;
+    // Only Lark messages carry reactions — doc-comment ids / chat anchors can't.
+    if (!triggerMessageId.startsWith('om_')) return;
+    if ((ds.pendingAckReactions ??= []).some(a => a.messageId === triggerMessageId)) return;
+    // Add the ✋ FIRST, register only after it lands AND identity is prepared.
+    // During either await a previous turn's idle edge
+    // (finishTurnReactions) could detach this half-formed entry mid-flight —
+    // DONE-ing a message that hasn't even reached the worker yet and orphaning its
+    // reactionId. Callers await this before dispatching the message to the worker,
+    // so a registered entry is always in place before its own turn can go idle.
+    try {
+      reactionId = await addReaction(ds.larkAppId, triggerMessageId, receivedReactionEmoji ?? receivedReactionEmojiFor(ds));
+    } catch (err) {
+      logger.debug(`[reaction] received add failed for ${triggerMessageId}: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+  } finally {
+    // Every admitted turn refreshes identity, including card-on, silent,
+    // duplicate, non-message and failed-reaction paths. Receipt failure must
+    // never leave the previous sender's identity in use for the next input.
+    if (triggerUserAuthEnabledFor(ds)) {
+      try {
+        await refreshTurnCliIdentity(ds, _turnId ?? triggerMessageId);
+      } catch (error) {
+        // Unexpected preparation failure aborts dispatch. Retire our early ack
+        // without a DONE marker; normal provider denial is published in-band.
+        if (reactionId !== undefined) {
+          try { await removeReaction(ds.larkAppId, triggerMessageId, reactionId); }
+          catch { /* best-effort feedback cleanup; preserve the identity error */ }
+        }
+        throw error;
+      }
+    }
   }
   (ds.pendingAckReactions ??= []).push({ messageId: triggerMessageId, reactionId });
 }
